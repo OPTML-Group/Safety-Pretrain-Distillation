@@ -1,0 +1,4 @@
+safety_distill/gold.py is adapted from the GOLD trainer in Hugging Face TRL
+(https://github.com/huggingface/trl, trl/experimental/gold/gold_trainer.py and
+trl/experimental/utils.py, commit 576a5f6), licensed under the Apache License,
+Version 2.0. Modifications are marked in the source.

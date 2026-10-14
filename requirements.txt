@@ -1,0 +1,9 @@
+torch>=2.3
+transformers>=4.45,<5
+accelerate>=1.0
+deepspeed>=0.15
+datasets>=2.20
+huggingface_hub
+numpy
+tqdm
+pandas
