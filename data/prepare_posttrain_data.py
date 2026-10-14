@@ -1,10 +1,9 @@
 """
 Prepare the safety post-training dataset (D_post) used by the utility loss.
 
-Follows Maini et al. 2025 (arXiv:2504.16980) Section 5:
+Combines, following the post-training pipeline of Maini et al. 2025 (arXiv:2504.16980):
   - UltraChat-200k (instruction following)
-  - WildGuardMix + WildJailbreak (safety instruction tuning, used in full)
-  - ~10% of RefuseWeb (the refusal training dataset, Section 3.3)
+  - WildGuardMix + WildJailbreak (safety instruction tuning)
 
 Output: train.json and val.json as
   [{"instruction": "...", "output": "..."}, ...]
@@ -12,7 +11,6 @@ Output: train.json and val.json as
 
 import json
 import random
-import re
 import argparse
 from pathlib import Path
 from datasets import load_dataset
@@ -188,125 +186,22 @@ def load_wildjailbreak(per_type_cap=None, seed=42):
     return samples
 
 
-def load_refuseweb(fraction=0.10, seed=42):
-    """Load RefuseWeb (locuslab/refuseweb) and extract instruction-output pairs.
-
-    RefuseWeb contains dialogues between a User and an Assistant where the
-    Assistant refuses harmful requests (Section 3.3 of Maini et al. 2025).
-    The text field contains the full dialogue.
-
-    Args:
-        fraction: Fraction of the dataset to use (~10% per the paper).
-        seed: Random seed for subsampling.
-    """
-    if fraction <= 0:
-        print("Loading RefuseWeb: skipped (fraction=0)")
-        return []
-
-    print("Loading RefuseWeb (score_5_refusal)...")
-    ds = load_dataset("locuslab/refuseweb", "score_5_refusal", split="train")
-
-    samples = []
-    for row in ds:
-        text = row["text"].strip()
-        if not text:
-            continue
-
-        # Parse User/Assistant dialogue from the text field.
-        # The paper says each text was "transformed into dialogues between
-        # a User and an Assistant" with names sometimes substituted.
-        # Try to extract the first user-assistant exchange.
-        pair = parse_dialogue(text)
-        if pair:
-            samples.append(pair)
-
-    print(f"  RefuseWeb total parsed: {len(samples)} dialogues")
-
-    # Subsample to the target fraction
-    rng = random.Random(seed)
-    n_target = int(len(samples) * fraction)
-    rng.shuffle(samples)
-    samples = samples[:n_target]
-
-    print(f"  RefuseWeb after {fraction:.0%} subsample: {len(samples)} samples")
-    return samples
-
-
-def parse_dialogue(text):
-    """Parse a RefuseWeb text into an instruction-output pair.
-
-    RefuseWeb dialogues follow a pattern like:
-        User/Name/Role: <request>
-        Assistant/Name/Role: <refusal>
-
-    The paper notes that "User" and "Assistant" labels were sometimes
-    replaced with personal names or occupational roles.
-    """
-    # Try to split on common dialogue markers
-    # Look for a two-turn pattern: someone asks, someone responds
-    lines = text.strip().split("\n")
-
-    # Strategy 1: Look for explicit "User:" / "Assistant:" markers
-    user_text = []
-    assistant_text = []
-    current_role = None
-
-    for line in lines:
-        line_stripped = line.strip()
-        # Check for role markers (User, Assistant, or name-substituted variants)
-        # The pattern is typically "RoleName: text"
-        if re.match(r'^(User|Human|Student|Person|Questioner|Asker)\s*:', line_stripped, re.IGNORECASE):
-            current_role = "user"
-            content = re.sub(r'^[^:]+:\s*', '', line_stripped)
-            if content:
-                user_text.append(content)
-        elif re.match(r'^(Assistant|AI|Teacher|Helper|Advisor|Responder|Counselor)\s*:', line_stripped, re.IGNORECASE):
-            current_role = "assistant"
-            content = re.sub(r'^[^:]+:\s*', '', line_stripped)
-            if content:
-                assistant_text.append(content)
-        elif current_role == "user":
-            user_text.append(line_stripped)
-        elif current_role == "assistant":
-            assistant_text.append(line_stripped)
-
-    if user_text and assistant_text:
-        instruction = "\n".join(user_text).strip()
-        output = "\n".join(assistant_text).strip()
-        if instruction and output:
-            return {"instruction": instruction, "output": output}
-
-    # Strategy 2: If no markers found, try splitting on the first
-    # line break that separates a short request from a longer response
-    if len(lines) >= 2:
-        # Assume first paragraph is the request, rest is the response
-        split_idx = next((i for i, l in enumerate(lines[1:], 1) if not l.strip()), 1)
-        instruction = "\n".join(lines[:split_idx]).strip()
-        output = "\n".join(lines[split_idx:]).strip()
-        if instruction and output and len(output) > len(instruction):
-            return {"instruction": instruction, "output": output}
-
-    return None
-
-
-def combine_datasets(ultrachat, wildguard, wildjailbreak, refuseweb, seed=42):
-    """Combine all datasets. WildGuard and WildJailbreak used in full,
-    RefuseWeb already subsampled."""
+def combine_datasets(ultrachat, wildguard, wildjailbreak, seed=42):
+    """Combine and shuffle all datasets (WildGuardMix and WildJailbreak in full)."""
     rng = random.Random(seed)
 
     n_instruction = len(ultrachat)
-    n_safety = len(wildguard) + len(wildjailbreak) + len(refuseweb)
+    n_safety = len(wildguard) + len(wildjailbreak)
 
     print(f"\nCombining datasets:")
     print(f"  UltraChat (instruction): {n_instruction}")
     print(f"  WildGuardMix (safety):   {len(wildguard)}")
     print(f"  WildJailbreak (safety):  {len(wildjailbreak)}")
-    print(f"  RefuseWeb (refusal):     {len(refuseweb)}")
     print(f"  Total safety:            {n_safety}")
     print(f"  Total:                   {n_instruction + n_safety}")
     print(f"  Safety fraction:         {n_safety / (n_instruction + n_safety):.1%}")
 
-    combined = ultrachat + wildguard + wildjailbreak + refuseweb
+    combined = ultrachat + wildguard + wildjailbreak
     rng.shuffle(combined)
 
     return combined
@@ -351,8 +246,6 @@ def main():
     parser = argparse.ArgumentParser(description="Prepare safety post-training dataset")
     parser.add_argument("--output_dir", type=str, default="data/safety_posttrain",
                         help="Output directory for train.json and val.json")
-    parser.add_argument("--refuseweb_fraction", type=float, default=0.10,
-                        help="Fraction of RefuseWeb to use (default: 0.10)")
     parser.add_argument("--max_ultrachat", type=int, default=None,
                         help="Max UltraChat samples (None = use all)")
     parser.add_argument("--val_fraction", type=float, default=0.05,
@@ -365,11 +258,8 @@ def main():
     ultrachat = load_ultrachat(max_samples=args.max_ultrachat)
     wildguard = load_wildguardmix()
     wildjailbreak = load_wildjailbreak()
-    refuseweb = load_refuseweb(fraction=args.refuseweb_fraction, seed=args.seed)
 
-    # Combine all (WildGuard + WildJailbreak in full, RefuseWeb subsampled)
-    combined = combine_datasets(ultrachat, wildguard, wildjailbreak, refuseweb,
-                                seed=args.seed)
+    combined = combine_datasets(ultrachat, wildguard, wildjailbreak, seed=args.seed)
 
     # Estimate token count
     estimate_tokens(combined)
